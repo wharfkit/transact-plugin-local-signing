@@ -1,12 +1,12 @@
 {
-    "name": "@wharfkit/transact-plugin-template",
-    "description": "A template to create plugins for use with @wharfkit/session transact method.",
+    "name": "@wharfkit/transact-plugin-local-signing",
+    "description": "A plugin that enables automatic local signing for specific contract actions.",
     "version": "1.0.0",
-    "homepage": "https://github.com/wharfkit/transact-plugin-template",
+    "homepage": "https://github.com/wharfkit/transact-plugin-local-signing",
     "license": "BSD-3-Clause",
-    "main": "lib/transact-plugin-template.js",
-    "module": "lib/transact-plugin-template.m.js",
-    "types": "lib/transact-plugin-template.d.ts",
+    "main": "lib/transact-plugin-local-signing.js",
+    "module": "lib/transact-plugin-local-signing.m.js",
+    "types": "lib/transact-plugin-local-signing.d.ts",
     "sideEffects": false,
     "files": [
         "lib/*",

@@ -1,5 +1,16 @@
 {
-    "beforesign": "undefined beforeSign hook called from plugin template",
-    "aftersign": "undefined afterSign hook called from plugin template",
-    "afterbroadcast": "undefined afterBroadcast hook called from plugin template"
+    "prompt": {
+        "title": "Enable Auto-Signing?",
+        "body": "Would you like to enable automatic signing for the following actions on {{contract}}?\n\nActions: {{actions}}\n\nThis will create a new permission on your account that can only perform these specific actions.",
+        "enable": "Enable Auto-Signing",
+        "skip": "Sign Manually This Time"
+    },
+    "signed": {
+        "title": "Auto-Signed",
+        "body": "Transaction was automatically signed with your local key."
+    },
+    "error": {
+        "no_storage": "Storage is required for local signing to work.",
+        "no_ui": "UI is required for the initial setup of local signing."
+    }
 }

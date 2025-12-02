@@ -1,5 +1,16 @@
 {
-    "beforesign": "undefined beforeSign hook called from plugin template",
-    "aftersign": "undefined afterSign hook called from plugin template",
-    "afterbroadcast": "undefined afterBroadcast hook called from plugin template"
+    "prompt": {
+        "title": "자동 서명 활성화?",
+        "body": "{{contract}}에서 다음 작업에 대한 자동 서명을 활성화하시겠습니까?\n\n작업: {{actions}}\n\n이 특정 작업만 수행할 수 있는 새 권한이 계정에 생성됩니다.",
+        "enable": "자동 서명 활성화",
+        "skip": "이번에는 수동으로 서명"
+    },
+    "signed": {
+        "title": "자동 서명됨",
+        "body": "로컬 키로 트랜잭션이 자동으로 서명되었습니다."
+    },
+    "error": {
+        "no_storage": "로컬 서명이 작동하려면 스토리지가 필요합니다.",
+        "no_ui": "로컬 서명의 초기 설정에는 UI가 필요합니다."
+    }
 }

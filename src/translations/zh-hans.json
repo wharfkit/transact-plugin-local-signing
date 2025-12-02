@@ -1,5 +1,16 @@
 {
-    "beforesign": "undefined beforeSign hook called from plugin template",
-    "aftersign": "undefined afterSign hook called from plugin template",
-    "afterbroadcast": "undefined afterBroadcast hook called from plugin template"
+    "prompt": {
+        "title": "启用自动签名？",
+        "body": "您是否要为 {{contract}} 上的以下操作启用自动签名？\n\n操作：{{actions}}\n\n这将在您的帐户上创建一个只能执行这些特定操作的新权限。",
+        "enable": "启用自动签名",
+        "skip": "这次手动签名"
+    },
+    "signed": {
+        "title": "已自动签名",
+        "body": "交易已使用您的本地密钥自动签名。"
+    },
+    "error": {
+        "no_storage": "本地签名需要存储才能工作。",
+        "no_ui": "本地签名的初始设置需要 UI。"
+    }
 }
