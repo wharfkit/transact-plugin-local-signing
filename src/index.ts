@@ -61,9 +61,6 @@ interface LocalSigningData {
 /**
  * A plugin that enables automatic local signing for specific contract actions.
  *
- * This plugin acts as both a LoginPlugin (to prompt during login) and a
- * TransactPlugin (to sign transactions).
- *
  * Usage:
  * ```typescript
  * const localSigningPlugin = new TransactPluginLocalSigning({
@@ -79,8 +76,13 @@ interface LocalSigningData {
  *     transactPlugins: [localSigningPlugin],
  * })
  *
- * // On logout, call teardown to clear the keys
- * await localSigningPlugin.teardown(session)
+ * // Login - prompts user and sets up permissions
+ * const { session } = await sessionKit.login()
+ *
+ * // Transact - auto-signed with local key!
+ * await session.transact({ action: playAction })
+ *
+ * // Logout - automatically cleans up keys via onLogout
  * await sessionKit.logout(session)
  * ```
  */
@@ -97,7 +99,7 @@ export class TransactPluginLocalSigning extends AbstractTransactPlugin {
     /** The permission name to use for local signing */
     private permissionName: Name
 
-    /** The login plugin instance for registering login hooks */
+    /** The login plugin instance - add this to loginPlugins array */
     public readonly loginPlugin: LocalSigningLoginPlugin
 
     constructor(options: TransactPluginLocalSigningOptions) {
@@ -289,10 +291,10 @@ export class TransactPluginLocalSigning extends AbstractTransactPlugin {
     }
 
     /**
-     * Teardown local signing - call this on logout
+     * Teardown local signing - deletes stored private keys
      *
-     * This will delete the stored private keys. The on-chain permissions
-     * will remain but won't be usable without the keys.
+     * Called automatically via onLogout when using updated SessionKit.
+     * The on-chain permissions remain but won't be usable without the keys.
      *
      * @param session The session to tear down local signing for
      */
@@ -308,10 +310,9 @@ export class TransactPluginLocalSigning extends AbstractTransactPlugin {
     }
 
     /**
-     * Register the hooks required for this plugin to function
+     * Register the transact hooks for local signing
      */
     register(context: TransactContext): void {
-        // Register the beforeSign hook
         context.addHook(
             TransactHookTypes.beforeSign,
             async (request, context): Promise<TransactHookResponseType> => {
@@ -417,7 +418,8 @@ export class TransactPluginLocalSigning extends AbstractTransactPlugin {
 /**
  * Companion LoginPlugin for TransactPluginLocalSigning
  *
- * This handles prompting the user during login to enable local signing.
+ * Handles prompting the user during login and cleanup on logout.
+ * Access via `plugin.loginPlugin` and add to `loginPlugins` array.
  */
 export class LocalSigningLoginPlugin extends AbstractLoginPlugin {
     private parent: TransactPluginLocalSigning
@@ -427,13 +429,23 @@ export class LocalSigningLoginPlugin extends AbstractLoginPlugin {
         this.parent = parent
     }
 
+    /**
+     * Called when a session is logged out.
+     * Cleans up stored local signing keys.
+     */
+    async onLogout(session: Session): Promise<void> {
+        await this.parent.teardown(session)
+    }
+
+    /**
+     * Register login hooks - prompts user to enable local signing after login
+     */
     register(context: LoginContext): void {
-        // Register afterLogin hook to prompt user
         context.addHook(LoginHookTypes.afterLogin, async (ctx: LoginContext) => {
-            // We need storage from somewhere - check if it's available
-            // Note: LoginContext doesn't have storage directly, so we'll use
-            // a workaround by checking for browser storage
-            const storage = this.getStorage()
+            // Get storage from session if available (requires updated SessionKit),
+            // otherwise fall back to browser storage
+            const ctxWithSession = ctx as LoginContext & {session?: Session}
+            const storage = ctxWithSession.session?.storage || this.getBrowserStorage()
             if (!storage) {
                 return
             }
@@ -495,24 +507,51 @@ export class LocalSigningLoginPlugin extends AbstractLoginPlugin {
                 // Generate a new key pair
                 const {privateKey, publicKey} = this.parent.generateLocalKey()
 
-                // Save the local signing data (permission setup will happen on first transact)
+                // Save the local signing data
                 const localData: LocalSigningData = {
                     privateKey: String(privateKey),
                     publicKey,
-                    permissionSetup: false, // Will be set up on first transact
+                    permissionSetup: false,
                 }
                 await this.parent.saveLocalSigningData(storage, config.contract, localData)
+
+                // If we have access to the session, set up the permission now
+                if (ctxWithSession.session) {
+                    try {
+                        const updateAuthAction = this.parent.createUpdateAuthAction(
+                            ctxWithSession.session.actor,
+                            publicKey
+                        )
+                        const linkAuthActions = this.parent.createLinkAuthActions(
+                            ctxWithSession.session.actor,
+                            config.contract,
+                            config.actions
+                        )
+
+                        // Execute the permission setup transaction
+                        await ctxWithSession.session.transact({
+                            actions: [updateAuthAction, ...linkAuthActions],
+                        })
+
+                        // Mark as set up
+                        localData.permissionSetup = true
+                        await this.parent.saveLocalSigningData(storage, config.contract, localData)
+                    } catch (error) {
+                        // Transaction failed, clean up the stored data
+                        await this.parent.deleteLocalSigningData(storage, config.contract)
+                        throw error
+                    }
+                }
+                // If no session available (old SessionKit), permission setup happens on first transact
             }
         })
     }
 
     /**
-     * Try to get storage - this is a workaround since LoginContext doesn't have storage
+     * Fallback storage using browser localStorage (for backwards compatibility)
      */
-    private getStorage(): SessionStorage | undefined {
-        // Check if we're in a browser environment with localStorage
+    private getBrowserStorage(): SessionStorage | undefined {
         if (typeof window !== 'undefined' && window.localStorage) {
-            // Return a simple localStorage wrapper
             return {
                 write: async (key: string, data: string) => {
                     window.localStorage.setItem(key, data)
