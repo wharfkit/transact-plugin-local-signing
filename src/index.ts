@@ -1,10 +1,15 @@
 import {
+    AbstractLoginPlugin,
     AbstractTransactPlugin,
     Action,
     Checksum256,
+    LoginContext,
+    LoginHookTypes,
     Name,
     NameType,
     PrivateKey,
+    Session,
+    SessionStorage,
     Signature,
     TransactContext,
     TransactHookResponseType,
@@ -49,12 +54,36 @@ interface LocalSigningData {
     privateKey: string
     /** The public key */
     publicKey: string
-    /** Whether the user has approved local signing */
-    approved: boolean
     /** Whether the permission has been set up on chain */
     permissionSetup: boolean
 }
 
+/**
+ * A plugin that enables automatic local signing for specific contract actions.
+ *
+ * This plugin acts as both a LoginPlugin (to prompt during login) and a
+ * TransactPlugin (to sign transactions).
+ *
+ * Usage:
+ * ```typescript
+ * const localSigningPlugin = new TransactPluginLocalSigning({
+ *     actionConfigs: [
+ *         { contract: 'gamecontract', actions: ['play', 'claim'] }
+ *     ]
+ * })
+ *
+ * const sessionKit = new SessionKit({
+ *     // ...
+ * }, {
+ *     loginPlugins: [localSigningPlugin.loginPlugin],
+ *     transactPlugins: [localSigningPlugin],
+ * })
+ *
+ * // On logout, call teardown to clear the keys
+ * await localSigningPlugin.teardown(session)
+ * await sessionKit.logout(session)
+ * ```
+ */
 export class TransactPluginLocalSigning extends AbstractTransactPlugin {
     /** A unique ID for this plugin */
     id = 'transact-plugin-local-signing'
@@ -68,6 +97,9 @@ export class TransactPluginLocalSigning extends AbstractTransactPlugin {
     /** The permission name to use for local signing */
     private permissionName: Name
 
+    /** The login plugin instance for registering login hooks */
+    public readonly loginPlugin: LocalSigningLoginPlugin
+
     constructor(options: TransactPluginLocalSigningOptions) {
         super()
         this.actionConfigs = options.actionConfigs.map((config) => ({
@@ -75,13 +107,30 @@ export class TransactPluginLocalSigning extends AbstractTransactPlugin {
             actions: config.actions.map((a) => Name.from(a)),
         }))
         this.permissionName = Name.from(options.permissionName || DEFAULT_PERMISSION_NAME)
+
+        // Create the companion login plugin
+        this.loginPlugin = new LocalSigningLoginPlugin(this)
     }
 
     /**
      * Get the storage key for a specific contract
      */
-    private getStorageKey(contract: NameType): string {
+    getStorageKey(contract: NameType): string {
         return `${STORAGE_KEY_PREFIX}-${contract}-${this.permissionName}`
+    }
+
+    /**
+     * Get the configured action configs
+     */
+    getActionConfigs(): LocalSigningActionConfig[] {
+        return this.actionConfigs
+    }
+
+    /**
+     * Get the permission name
+     */
+    getPermissionName(): Name {
+        return this.permissionName
     }
 
     /**
@@ -100,32 +149,14 @@ export class TransactPluginLocalSigning extends AbstractTransactPlugin {
     }
 
     /**
-     * Get the contract for a matching action
-     */
-    private getMatchingContract(action: Action): Name | undefined {
-        for (const config of this.actionConfigs) {
-            if (
-                Name.from(action.account).equals(config.contract) &&
-                config.actions.some((a) => Name.from(a).equals(action.name))
-            ) {
-                return Name.from(config.contract)
-            }
-        }
-        return undefined
-    }
-
-    /**
      * Load local signing data from storage
      */
-    private async loadLocalSigningData(
-        context: TransactContext,
+    async loadLocalSigningData(
+        storage: SessionStorage,
         contract: NameType
     ): Promise<LocalSigningData | undefined> {
-        if (!context.storage) {
-            return undefined
-        }
         const key = this.getStorageKey(contract)
-        const data = await context.storage.read(key)
+        const data = await storage.read(key)
         if (data) {
             return JSON.parse(data) as LocalSigningData
         }
@@ -135,22 +166,27 @@ export class TransactPluginLocalSigning extends AbstractTransactPlugin {
     /**
      * Save local signing data to storage
      */
-    private async saveLocalSigningData(
-        context: TransactContext,
+    async saveLocalSigningData(
+        storage: SessionStorage,
         contract: NameType,
         data: LocalSigningData
     ): Promise<void> {
-        if (!context.storage) {
-            throw new Error('Storage is required for local signing')
-        }
         const key = this.getStorageKey(contract)
-        await context.storage.write(key, JSON.stringify(data))
+        await storage.write(key, JSON.stringify(data))
+    }
+
+    /**
+     * Delete local signing data from storage
+     */
+    async deleteLocalSigningData(storage: SessionStorage, contract: NameType): Promise<void> {
+        const key = this.getStorageKey(contract)
+        await storage.remove(key)
     }
 
     /**
      * Generate a new private key for local signing
      */
-    private generateLocalKey(): {privateKey: PrivateKey; publicKey: string} {
+    generateLocalKey(): {privateKey: PrivateKey; publicKey: string} {
         const privateKey = PrivateKey.generate('K1')
         const publicKey = String(privateKey.toPublic())
         return {privateKey, publicKey}
@@ -172,7 +208,7 @@ export class TransactPluginLocalSigning extends AbstractTransactPlugin {
     /**
      * Create the updateauth action to add a new permission
      */
-    private createUpdateAuthAction(
+    createUpdateAuthAction(
         account: NameType,
         publicKey: string,
         parentPermission: NameType = 'active'
@@ -208,11 +244,7 @@ export class TransactPluginLocalSigning extends AbstractTransactPlugin {
     /**
      * Create the linkauth action to link the permission to specific actions
      */
-    private createLinkAuthActions(
-        account: NameType,
-        contract: NameType,
-        actions: NameType[]
-    ): Action[] {
+    createLinkAuthActions(account: NameType, contract: NameType, actions: NameType[]): Action[] {
         return actions.map((actionName) =>
             Action.from({
                 account: 'eosio',
@@ -234,92 +266,218 @@ export class TransactPluginLocalSigning extends AbstractTransactPlugin {
     }
 
     /**
+     * Check if local signing is already set up for a contract
+     */
+    async isSetup(session: Session, contract: NameType): Promise<boolean> {
+        if (!session.storage) {
+            return false
+        }
+        const data = await this.loadLocalSigningData(session.storage, contract)
+        return data?.permissionSetup === true
+    }
+
+    /**
+     * Check if local signing is set up for any configured contract
+     */
+    async isAnySetup(session: Session): Promise<boolean> {
+        for (const config of this.actionConfigs) {
+            if (await this.isSetup(session, config.contract)) {
+                return true
+            }
+        }
+        return false
+    }
+
+    /**
+     * Teardown local signing - call this on logout
+     *
+     * This will delete the stored private keys. The on-chain permissions
+     * will remain but won't be usable without the keys.
+     *
+     * @param session The session to tear down local signing for
+     */
+    async teardown(session: Session): Promise<void> {
+        if (!session.storage) {
+            return
+        }
+
+        // Delete stored keys for all configured contracts
+        for (const config of this.actionConfigs) {
+            await this.deleteLocalSigningData(session.storage, config.contract)
+        }
+    }
+
+    /**
      * Register the hooks required for this plugin to function
      */
     register(context: TransactContext): void {
-        // Get the translation function from the UI if it exists
-        const t = context.ui?.getTranslate(this.id)
-
         // Register the beforeSign hook
         context.addHook(
             TransactHookTypes.beforeSign,
             async (request, context): Promise<TransactHookResponseType> => {
+                if (!context.storage) {
+                    return // No storage, can't use local signing
+                }
+
                 // Resolve the request to get the transaction
                 const resolved = await context.resolve(request)
                 const transaction = Transaction.from(resolved.transaction)
 
-                // Check if any action should be handled by local signing
-                const matchingActions = transaction.actions.filter((action) =>
+                // Check if any actions need local signing setup
+                for (const config of this.actionConfigs) {
+                    const localData = await this.loadLocalSigningData(
+                        context.storage,
+                        config.contract
+                    )
+
+                    // If we have key data but permission isn't set up yet, prepend the setup actions
+                    if (localData && !localData.permissionSetup) {
+                        const updateAuthAction = this.createUpdateAuthAction(
+                            context.accountName,
+                            localData.publicKey
+                        )
+                        const linkAuthActions = this.createLinkAuthActions(
+                            context.accountName,
+                            config.contract,
+                            config.actions
+                        )
+
+                        // Create a new request with the permission setup actions prepended
+                        const allActions = [
+                            updateAuthAction,
+                            ...linkAuthActions,
+                            ...transaction.actions,
+                        ]
+                        const newRequest = await context.createRequest({
+                            actions: allActions,
+                        })
+
+                        // Mark as set up (optimistically - if tx fails, user can retry)
+                        localData.permissionSetup = true
+                        await this.saveLocalSigningData(context.storage, config.contract, localData)
+
+                        // Return the modified request - user will sign with their wallet
+                        return {
+                            request: newRequest,
+                        }
+                    }
+                }
+
+                // Check if ALL actions in the transaction can be handled by local signing
+                const allActionsAreLocal = transaction.actions.every((action) =>
                     this.isLocalSigningAction(action)
                 )
 
-                if (matchingActions.length === 0) {
-                    // No matching actions, let the transaction proceed normally
+                if (!allActionsAreLocal) {
+                    // Some actions aren't configured for local signing, proceed normally
                     return
                 }
 
-                // Get the first matching contract (for simplicity, handle one at a time)
-                const contract = this.getMatchingContract(matchingActions[0])
-                if (!contract) {
+                // Find the first matching contract to get the stored key
+                let localData: LocalSigningData | undefined
+                for (const action of transaction.actions) {
+                    for (const config of this.actionConfigs) {
+                        if (Name.from(action.account).equals(config.contract)) {
+                            localData = await this.loadLocalSigningData(
+                                context.storage,
+                                config.contract
+                            )
+                            if (localData?.permissionSetup) {
+                                break
+                            }
+                        }
+                    }
+                    if (localData?.permissionSetup) {
+                        break
+                    }
+                }
+
+                if (!localData?.permissionSetup || !localData.privateKey) {
+                    // Not set up yet, proceed with normal signing
                     return
                 }
 
-                // Load existing local signing data
-                let localData = await this.loadLocalSigningData(context, contract)
+                // Sign with the local key
+                const signature = this.signWithLocalKey(
+                    transaction,
+                    Checksum256.from(context.chain.id),
+                    localData.privateKey
+                )
 
-                // If no local data exists, prompt the user for approval
-                if (!localData || !localData.approved) {
-                    if (!context.ui) {
-                        // No UI available, cannot prompt user
-                        return
-                    }
+                // Return the signatures
+                return {
+                    request,
+                    signatures: [signature],
+                }
+            }
+        )
+    }
+}
 
-                    // Find the config for this contract to get the action names
-                    const config = this.actionConfigs.find((c) =>
-                        Name.from(c.contract).equals(contract)
-                    )
-                    if (!config) {
-                        return
-                    }
+/**
+ * Companion LoginPlugin for TransactPluginLocalSigning
+ *
+ * This handles prompting the user during login to enable local signing.
+ */
+export class LocalSigningLoginPlugin extends AbstractLoginPlugin {
+    private parent: TransactPluginLocalSigning
 
-                    const actionNames = config.actions.map((a) => String(a)).join(', ')
+    constructor(parent: TransactPluginLocalSigning) {
+        super()
+        this.parent = parent
+    }
 
-                    // Prompt the user
-                    const promptResponse = await context.ui.prompt({
-                        title: t
-                            ? t('prompt.title', {default: 'Enable Auto-Signing?'})
-                            : 'Enable Auto-Signing?',
-                        body: t
-                            ? t('prompt.body', {
-                                  default: `Would you like to enable automatic signing for the following actions on ${contract}?\n\nActions: ${actionNames}\n\nThis will create a new permission on your account that can only perform these specific actions.`,
-                                  contract: String(contract),
-                                  actions: actionNames,
-                              })
-                            : `Would you like to enable automatic signing for the following actions on ${contract}?\n\nActions: ${actionNames}\n\nThis will create a new permission on your account that can only perform these specific actions.`,
+    register(context: LoginContext): void {
+        // Register afterLogin hook to prompt user
+        context.addHook(LoginHookTypes.afterLogin, async (ctx: LoginContext) => {
+            // We need storage from somewhere - check if it's available
+            // Note: LoginContext doesn't have storage directly, so we'll use
+            // a workaround by checking for browser storage
+            const storage = this.getStorage()
+            if (!storage) {
+                return
+            }
+
+            const t = ctx.ui.getTranslate(this.parent.id)
+
+            // Process each configured contract
+            for (const config of this.parent.getActionConfigs()) {
+                // Check if already set up
+                const existingData = await this.parent.loadLocalSigningData(
+                    storage,
+                    config.contract
+                )
+                if (existingData?.privateKey) {
+                    continue // Already have a key for this contract
+                }
+
+                const actionNames = config.actions.map((a) => String(a)).join(', ')
+
+                // Prompt the user
+                try {
+                    const promptResponse = await ctx.ui.prompt({
+                        title: t('prompt.title', {default: 'Enable Auto-Signing?'}),
+                        body: t('prompt.body', {
+                            default: `Would you like to enable automatic signing for the following actions on ${config.contract}?\n\nActions: ${actionNames}\n\nThis will create a new permission on your account that can only perform these specific actions.`,
+                            contract: String(config.contract),
+                            actions: actionNames,
+                        }),
                         elements: [
                             {
                                 type: 'button',
-                                label: t
-                                    ? t('prompt.enable', {default: 'Enable Auto-Signing'})
-                                    : 'Enable Auto-Signing',
+                                label: t('prompt.enable', {default: 'Enable Auto-Signing'}),
                                 data: {
                                     onClick: () => ({approved: true}),
-                                    label: t
-                                        ? t('prompt.enable', {default: 'Enable Auto-Signing'})
-                                        : 'Enable Auto-Signing',
+                                    label: t('prompt.enable', {default: 'Enable Auto-Signing'}),
                                     variant: 'primary',
                                 },
                             },
                             {
                                 type: 'button',
-                                label: t
-                                    ? t('prompt.skip', {default: 'Sign Manually This Time'})
-                                    : 'Sign Manually This Time',
+                                label: t('prompt.skip', {default: 'No Thanks'}),
                                 data: {
                                     onClick: () => ({approved: false}),
-                                    label: t
-                                        ? t('prompt.skip', {default: 'Sign Manually This Time'})
-                                        : 'Sign Manually This Time',
+                                    label: t('prompt.skip', {default: 'No Thanks'}),
                                 },
                             },
                         ],
@@ -327,95 +485,46 @@ export class TransactPluginLocalSigning extends AbstractTransactPlugin {
 
                     // Check if user approved
                     if (!promptResponse || !(promptResponse as {approved?: boolean}).approved) {
-                        // User declined, proceed with normal signing
-                        return
+                        continue // User declined for this contract
                     }
-
-                    // Generate a new key pair
-                    const {privateKey, publicKey} = this.generateLocalKey()
-
-                    // Save the local signing data
-                    localData = {
-                        privateKey: String(privateKey),
-                        publicKey,
-                        approved: true,
-                        permissionSetup: false,
-                    }
-                    await this.saveLocalSigningData(context, contract, localData)
-
-                    // Create the permission setup actions
-                    const updateAuthAction = this.createUpdateAuthAction(
-                        context.accountName,
-                        publicKey
-                    )
-                    const linkAuthActions = this.createLinkAuthActions(
-                        context.accountName,
-                        contract,
-                        config.actions
-                    )
-
-                    // Create a new request with the permission setup actions prepended
-                    const allActions = [
-                        updateAuthAction,
-                        ...linkAuthActions,
-                        ...transaction.actions,
-                    ]
-                    const newRequest = await context.createRequest({
-                        actions: allActions,
-                    })
-
-                    // Update the stored data to indicate permission is being set up
-                    localData.permissionSetup = true
-                    await this.saveLocalSigningData(context, contract, localData)
-
-                    // Return the modified request - user will sign with their wallet
-                    return {
-                        request: newRequest,
-                    }
+                } catch {
+                    // User closed the prompt
+                    continue
                 }
 
-                // If permission is set up, sign locally
-                if (localData.permissionSetup && localData.privateKey) {
-                    // Check if ALL actions in the transaction are local signing actions
-                    const allActionsAreLocal = transaction.actions.every((action) =>
-                        this.isLocalSigningAction(action)
-                    )
+                // Generate a new key pair
+                const {privateKey, publicKey} = this.parent.generateLocalKey()
 
-                    if (allActionsAreLocal) {
-                        // Sign with the local key
-                        const signature = this.signWithLocalKey(
-                            transaction,
-                            Checksum256.from(context.chain.id),
-                            localData.privateKey
-                        )
-
-                        // Show a brief notification if UI is available
-                        if (context.ui) {
-                            context.ui.prompt({
-                                title: t
-                                    ? t('signed.title', {default: 'Auto-Signed'})
-                                    : 'Auto-Signed',
-                                body: t
-                                    ? t('signed.body', {
-                                          default:
-                                              'Transaction was automatically signed with your local key.',
-                                      })
-                                    : 'Transaction was automatically signed with your local key.',
-                                elements: [],
-                            })
-                        }
-
-                        // Return the signatures
-                        return {
-                            request,
-                            signatures: [signature],
-                        }
-                    }
+                // Save the local signing data (permission setup will happen on first transact)
+                const localData: LocalSigningData = {
+                    privateKey: String(privateKey),
+                    publicKey,
+                    permissionSetup: false, // Will be set up on first transact
                 }
-
-                // If we get here, let the transaction proceed normally
-                return
+                await this.parent.saveLocalSigningData(storage, config.contract, localData)
             }
-        )
+        })
+    }
+
+    /**
+     * Try to get storage - this is a workaround since LoginContext doesn't have storage
+     */
+    private getStorage(): SessionStorage | undefined {
+        // Check if we're in a browser environment with localStorage
+        if (typeof window !== 'undefined' && window.localStorage) {
+            // Return a simple localStorage wrapper
+            return {
+                write: async (key: string, data: string) => {
+                    window.localStorage.setItem(key, data)
+                },
+                read: async (key: string): Promise<string | null> => {
+                    return window.localStorage.getItem(key)
+                },
+                remove: async (key: string) => {
+                    window.localStorage.removeItem(key)
+                },
+            }
+        }
+        return undefined
     }
 }
