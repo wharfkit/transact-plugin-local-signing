@@ -485,30 +485,26 @@ export class LocalSigningLoginPlugin extends AbstractLoginPlugin {
                     continue // Can't set up without a session
                 }
 
-                try {
-                    const updateAuthAction = this.parent.createUpdateAuthAction(
-                        ctxWithSession.session.actor,
-                        config.contract,
-                        publicKey
-                    )
-                    const linkAuthActions = this.parent.createLinkAuthActions(
-                        ctxWithSession.session.actor,
-                        config.contract,
-                        config.actions
-                    )
+                const updateAuthAction = this.parent.createUpdateAuthAction(
+                    ctxWithSession.session.actor,
+                    config.contract,
+                    publicKey
+                )
+                const linkAuthActions = this.parent.createLinkAuthActions(
+                    ctxWithSession.session.actor,
+                    config.contract,
+                    config.actions
+                )
 
-                    // Execute the permission setup transaction
-                    await ctxWithSession.session.transact({
-                        actions: [updateAuthAction, ...linkAuthActions],
-                    })
+                // Execute the permission setup transaction
+                // If this throws, the key won't be saved (which is the desired behavior)
+                await ctxWithSession.session.transact({
+                    actions: [updateAuthAction, ...linkAuthActions],
+                })
 
-                    // Only save the key after successful setup
-                    // (key existing = permission set up)
-                    await this.parent.savePrivateKey(storage, config.contract, String(privateKey))
-                } catch (error) {
-                    // Transaction failed, don't save the key
-                    throw error
-                }
+                // Only save the key after successful setup
+                // (key existing = permission set up)
+                await this.parent.savePrivateKey(storage, config.contract, String(privateKey))
             }
         })
     }

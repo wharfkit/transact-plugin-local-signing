@@ -10,9 +10,7 @@ import {Name, PrivateKey, Session, SessionArgs, SessionOptions} from '@wharfkit/
 import {mockFetch, MockStorage} from '@wharfkit/mock-data'
 import {WalletPluginPrivateKey} from '@wharfkit/wallet-plugin-privatekey'
 
-const wallet = new WalletPluginPrivateKey(
-    '5Jtoxgny5tT7NiNFp1MLogviuPJ9NniWjnU4wKzaX4t7pL4kJ8s'
-)
+const wallet = new WalletPluginPrivateKey('5Jtoxgny5tT7NiNFp1MLogviuPJ9NniWjnU4wKzaX4t7pL4kJ8s')
 
 const mockSessionArgs: SessionArgs = {
     chain: {
@@ -55,20 +53,6 @@ suite('TransactPluginLocalSigning', function () {
             assert.equal(plugin.id, 'transact-plugin-local-signing')
         })
 
-        test('should accept custom permission name', function () {
-            const options: TransactPluginLocalSigningOptions = {
-                actionConfigs: [
-                    {
-                        contract: 'eosio.token',
-                        actions: ['transfer'],
-                    },
-                ],
-                permissionName: 'autosign',
-            }
-            const plugin = new TransactPluginLocalSigning(options)
-            assert.equal(plugin.id, 'transact-plugin-local-signing')
-        })
-
         test('should create a loginPlugin', function () {
             const options: TransactPluginLocalSigningOptions = {
                 actionConfigs: [
@@ -97,28 +81,28 @@ suite('TransactPluginLocalSigning', function () {
             }
             const plugin = new TransactPluginLocalSigning(options)
 
-const mockSessionOptions: SessionOptions = {
-    fetch: mockFetch,
+            const mockSessionOptions: SessionOptions = {
+                fetch: mockFetch,
                 storage,
                 transactPlugins: [plugin],
-}
+            }
 
-        const session = new Session(mockSessionArgs, mockSessionOptions)
+            const session = new Session(mockSessionArgs, mockSessionOptions)
 
             // This action doesn't match the configured actions
-        const action = {
-            authorization: [
-                {
-                    actor: 'wharfkit1115',
-                    permission: 'test',
-                },
-            ],
-            account: 'eosio.token',
-            name: 'transfer',
-            data: {
-                from: 'wharfkit1115',
-                to: 'wharfkittest',
-                quantity: '0.0001 EOS',
+            const action = {
+                authorization: [
+                    {
+                        actor: 'wharfkit1115',
+                        permission: 'test',
+                    },
+                ],
+                account: 'eosio.token',
+                name: 'transfer',
+                data: {
+                    from: 'wharfkit1115',
+                    to: 'wharfkittest',
+                    quantity: '0.0001 EOS',
                     memo: 'test',
                 },
             }
@@ -157,7 +141,7 @@ const mockSessionOptions: SessionOptions = {
     })
 
     suite('storage operations', function () {
-        test('should save and load local signing data', async function () {
+        test('should save and load private key (obfuscated)', async function () {
             const storage = new MockStorage()
             const options: TransactPluginLocalSigningOptions = {
                 actionConfigs: [
@@ -169,19 +153,15 @@ const mockSessionOptions: SessionOptions = {
             }
             const plugin = new TransactPluginLocalSigning(options)
 
-            const testData = {
-                privateKey: 'PVT_K1_test',
-                publicKey: 'PUB_K1_test',
-                permissionSetup: false,
-            }
+            const testKey = 'PVT_K1_2bfGi9rYsXQSXXTvJbDAPhHLQUojjaNLomdm3cEJ1XTzMqUt3V'
 
-            await plugin.saveLocalSigningData(storage, 'gamecontract', testData)
-            const loaded = await plugin.loadLocalSigningData(storage, 'gamecontract')
+            await plugin.savePrivateKey(storage, 'gamecontract', testKey)
+            const loaded = await plugin.loadPrivateKey(storage, 'gamecontract')
 
-            assert.deepEqual(loaded, testData)
+            assert.equal(loaded, testKey)
         })
 
-        test('should delete local signing data', async function () {
+        test('should store key obfuscated (not raw WIF)', async function () {
             const storage = new MockStorage()
             const options: TransactPluginLocalSigningOptions = {
                 actionConfigs: [
@@ -193,20 +173,43 @@ const mockSessionOptions: SessionOptions = {
             }
             const plugin = new TransactPluginLocalSigning(options)
 
-            const testData = {
-                privateKey: 'PVT_K1_test',
-                publicKey: 'PUB_K1_test',
-                permissionSetup: false,
-            }
+            const testKey = 'PVT_K1_2bfGi9rYsXQSXXTvJbDAPhHLQUojjaNLomdm3cEJ1XTzMqUt3V'
 
-            await plugin.saveLocalSigningData(storage, 'gamecontract', testData)
-            await plugin.deleteLocalSigningData(storage, 'gamecontract')
-            const loaded = await plugin.loadLocalSigningData(storage, 'gamecontract')
+            await plugin.savePrivateKey(storage, 'gamecontract', testKey)
+
+            // Read raw storage value
+            const storageKey = plugin.getStorageKey('gamecontract')
+            const rawValue = await storage.read(storageKey)
+
+            // Should NOT contain the raw WIF prefix patterns
+            assert.isFalse(rawValue?.startsWith('PVT_K1_'))
+            assert.isFalse(rawValue?.startsWith('5J'))
+            assert.isFalse(rawValue?.startsWith('5K'))
+            assert.isFalse(rawValue?.startsWith('5H'))
+        })
+
+        test('should delete private key', async function () {
+            const storage = new MockStorage()
+            const options: TransactPluginLocalSigningOptions = {
+                actionConfigs: [
+                    {
+                        contract: 'gamecontract',
+                        actions: ['play'],
+                    },
+                ],
+            }
+            const plugin = new TransactPluginLocalSigning(options)
+
+            const testKey = 'PVT_K1_2bfGi9rYsXQSXXTvJbDAPhHLQUojjaNLomdm3cEJ1XTzMqUt3V'
+
+            await plugin.savePrivateKey(storage, 'gamecontract', testKey)
+            await plugin.deletePrivateKey(storage, 'gamecontract')
+            const loaded = await plugin.loadPrivateKey(storage, 'gamecontract')
 
             assert.isUndefined(loaded)
         })
 
-        test('should return undefined for non-existent data', async function () {
+        test('should return undefined for non-existent key', async function () {
             const storage = new MockStorage()
             const options: TransactPluginLocalSigningOptions = {
                 actionConfigs: [
@@ -218,13 +221,13 @@ const mockSessionOptions: SessionOptions = {
             }
             const plugin = new TransactPluginLocalSigning(options)
 
-            const loaded = await plugin.loadLocalSigningData(storage, 'nonexistent')
+            const loaded = await plugin.loadPrivateKey(storage, 'nonexistent')
             assert.isUndefined(loaded)
         })
     })
 
     suite('isSetup', function () {
-        test('should return false when no data exists', async function () {
+        test('should return false when no key exists', async function () {
             const storage = new MockStorage()
             const options: TransactPluginLocalSigningOptions = {
                 actionConfigs: [
@@ -247,7 +250,7 @@ const mockSessionOptions: SessionOptions = {
             assert.isFalse(result)
         })
 
-        test('should return false when permission not set up', async function () {
+        test('should return true when key exists (key exists = permission set up)', async function () {
             const storage = new MockStorage()
             const options: TransactPluginLocalSigningOptions = {
                 actionConfigs: [
@@ -266,42 +269,12 @@ const mockSessionOptions: SessionOptions = {
             }
             const session = new Session(mockSessionArgs, mockSessionOptions)
 
-            // Save data without permissionSetup
-            await plugin.saveLocalSigningData(storage, 'gamecontract', {
-                privateKey: 'PVT_K1_test',
-                publicKey: 'PUB_K1_test',
-                permissionSetup: false,
-            })
-
-            const result = await plugin.isSetup(session, 'gamecontract')
-            assert.isFalse(result)
-        })
-
-        test('should return true when permission is set up', async function () {
-            const storage = new MockStorage()
-            const options: TransactPluginLocalSigningOptions = {
-                actionConfigs: [
-                    {
-                        contract: 'gamecontract',
-                        actions: ['play'],
-                    },
-                ],
-            }
-            const plugin = new TransactPluginLocalSigning(options)
-
-            const mockSessionOptions: SessionOptions = {
-                fetch: mockFetch,
+            // Save a key
+            await plugin.savePrivateKey(
                 storage,
-                transactPlugins: [plugin],
-            }
-            const session = new Session(mockSessionArgs, mockSessionOptions)
-
-            // Save data with permissionSetup
-            await plugin.saveLocalSigningData(storage, 'gamecontract', {
-                privateKey: 'PVT_K1_test',
-                publicKey: 'PUB_K1_test',
-                permissionSetup: true,
-            })
+                'gamecontract',
+                'PVT_K1_2bfGi9rYsXQSXXTvJbDAPhHLQUojjaNLomdm3cEJ1XTzMqUt3V'
+            )
 
             const result = await plugin.isSetup(session, 'gamecontract')
             assert.isTrue(result)
@@ -332,28 +305,28 @@ const mockSessionOptions: SessionOptions = {
             }
             const session = new Session(mockSessionArgs, mockSessionOptions)
 
-            // Save data for both contracts
-            await plugin.saveLocalSigningData(storage, 'gamecontract', {
-                privateKey: 'PVT_K1_test1',
-                publicKey: 'PUB_K1_test1',
-                permissionSetup: true,
-            })
-            await plugin.saveLocalSigningData(storage, 'othercontrc', {
-                privateKey: 'PVT_K1_test2',
-                publicKey: 'PUB_K1_test2',
-                permissionSetup: true,
-            })
+            // Save keys for both contracts
+            await plugin.savePrivateKey(
+                storage,
+                'gamecontract',
+                'PVT_K1_2bfGi9rYsXQSXXTvJbDAPhHLQUojjaNLomdm3cEJ1XTzMqUt3V'
+            )
+            await plugin.savePrivateKey(
+                storage,
+                'othercontrc',
+                'PVT_K1_2bfGi9rYsXQSXXTvJbDAPhHLQUojjaNLomdm3cEJ1XTzMqUt3V'
+            )
 
-            // Verify data exists
-            assert.isDefined(await plugin.loadLocalSigningData(storage, 'gamecontract'))
-            assert.isDefined(await plugin.loadLocalSigningData(storage, 'othercontrc'))
+            // Verify keys exist
+            assert.isDefined(await plugin.loadPrivateKey(storage, 'gamecontract'))
+            assert.isDefined(await plugin.loadPrivateKey(storage, 'othercontrc'))
 
             // Call teardown
             await plugin.teardown(session)
 
-            // Verify data is deleted
-            assert.isUndefined(await plugin.loadLocalSigningData(storage, 'gamecontract'))
-            assert.isUndefined(await plugin.loadLocalSigningData(storage, 'othercontrc'))
+            // Verify keys are deleted
+            assert.isUndefined(await plugin.loadPrivateKey(storage, 'gamecontract'))
+            assert.isUndefined(await plugin.loadPrivateKey(storage, 'othercontrc'))
         })
     })
 
@@ -377,7 +350,7 @@ const mockSessionOptions: SessionOptions = {
     })
 
     suite('getters', function () {
-        test('getStorageKey should return correct key format', function () {
+        test('getStorageKey should return shipload-style key format', function () {
             const options: TransactPluginLocalSigningOptions = {
                 actionConfigs: [
                     {
@@ -385,12 +358,11 @@ const mockSessionOptions: SessionOptions = {
                         actions: ['play'],
                     },
                 ],
-                permissionName: 'autosign',
             }
             const plugin = new TransactPluginLocalSigning(options)
 
             const key = plugin.getStorageKey('gamecontract')
-            assert.equal(key, 'local-signing-gamecontract-autosign')
+            assert.equal(key, 'localsession-gamecontract')
         })
 
         test('getActionConfigs should return configured actions', function () {
@@ -410,7 +382,7 @@ const mockSessionOptions: SessionOptions = {
             assert.lengthOf(configs[0].actions, 2)
         })
 
-        test('getPermissionName should return permission name', function () {
+        test('getPermissionName should return contract name as permission', function () {
             const options: TransactPluginLocalSigningOptions = {
                 actionConfigs: [
                     {
@@ -418,12 +390,12 @@ const mockSessionOptions: SessionOptions = {
                         actions: ['play'],
                     },
                 ],
-                permissionName: 'mylocal',
             }
             const plugin = new TransactPluginLocalSigning(options)
 
-            const permName = plugin.getPermissionName()
-            assert.isTrue(permName.equals(Name.from('mylocal')))
+            // Permission name = contract name (shipload pattern)
+            const permName = plugin.getPermissionName('gamecontract')
+            assert.isTrue(permName.equals(Name.from('gamecontract')))
         })
     })
 
@@ -440,6 +412,38 @@ const mockSessionOptions: SessionOptions = {
             const plugin = new TransactPluginLocalSigning(options)
             assert.isDefined(plugin.translations)
             assert.isDefined(plugin.translations.en)
+        })
+    })
+
+    suite('obfuscation', function () {
+        test('should round-trip obfuscation correctly', async function () {
+            const storage = new MockStorage()
+            const options: TransactPluginLocalSigningOptions = {
+                actionConfigs: [
+                    {
+                        contract: 'gamecontract',
+                        actions: ['play'],
+                    },
+                ],
+            }
+            const plugin = new TransactPluginLocalSigning(options)
+
+            // Test with various key formats
+            const testKeys = [
+                'PVT_K1_2bfGi9rYsXQSXXTvJbDAPhHLQUojjaNLomdm3cEJ1XTzMqUt3V',
+                '5JuH9fCXmU3xbj8nRmhPZaVrxxXrdPaRaPhAbW4DU1RCNKY2gDq',
+                '5KQwrPbwdL6PhXujxW37FSSQZ1JiwsST4cqQzDeyXtP79zkvFD3',
+            ]
+
+            for (const testKey of testKeys) {
+                await plugin.savePrivateKey(storage, 'gamecontract', testKey)
+                const loaded = await plugin.loadPrivateKey(storage, 'gamecontract')
+                assert.equal(
+                    loaded,
+                    testKey,
+                    `Failed to round-trip key: ${testKey.substring(0, 10)}...`
+                )
+            }
         })
     })
 })
