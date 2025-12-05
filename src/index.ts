@@ -41,16 +41,32 @@ export interface TransactPluginLocalSigningOptions {
     actionConfigs: LocalSigningActionConfig[]
 }
 
+// Storage format: Base64-encoded private key (obfuscated to avoid extension detection)
+// If a key exists in storage, the permission has been set up.
+// Public key can be derived from private key when needed.
+
 /**
- * Data stored for each local signing configuration
+ * Simple obfuscation to prevent browser extensions from detecting private keys.
+ * Extensions often scan for WIF patterns like "5J...", "5K...", "5H...".
+ * Base64 encoding breaks these patterns.
  */
-interface LocalSigningData {
-    /** The private key (WIF format) */
-    privateKey: string
-    /** The public key */
-    publicKey: string
-    /** Whether the permission has been set up on chain */
-    permissionSetup: boolean
+function obfuscateKey(privateKeyWif: string): string {
+    if (typeof btoa !== 'undefined') {
+        return btoa(privateKeyWif)
+    }
+    // Node.js fallback
+    return Buffer.from(privateKeyWif).toString('base64')
+}
+
+/**
+ * Decode an obfuscated private key
+ */
+function deobfuscateKey(obfuscated: string): string {
+    if (typeof atob !== 'undefined') {
+        return atob(obfuscated)
+    }
+    // Node.js fallback
+    return Buffer.from(obfuscated, 'base64').toString('utf8')
 }
 
 /**
@@ -146,36 +162,35 @@ export class TransactPluginLocalSigning extends AbstractTransactPlugin {
     }
 
     /**
-     * Load local signing data from storage
+     * Load the stored private key for a contract
+     * Returns the raw WIF private key string, or undefined if not set up
      */
-    async loadLocalSigningData(
-        storage: SessionStorage,
-        contract: NameType
-    ): Promise<LocalSigningData | undefined> {
-        const key = this.getStorageKey(contract)
-        const data = await storage.read(key)
-        if (data) {
-            return JSON.parse(data) as LocalSigningData
+    async loadPrivateKey(storage: SessionStorage, contract: NameType): Promise<string | undefined> {
+        const storageKey = this.getStorageKey(contract)
+        const obfuscated = await storage.read(storageKey)
+        if (!obfuscated) {
+            return undefined
         }
-        return undefined
+        return deobfuscateKey(obfuscated)
     }
 
     /**
-     * Save local signing data to storage
+     * Save a private key to storage (obfuscated to avoid extension detection)
      */
-    async saveLocalSigningData(
+    async savePrivateKey(
         storage: SessionStorage,
         contract: NameType,
-        data: LocalSigningData
+        privateKey: string
     ): Promise<void> {
-        const key = this.getStorageKey(contract)
-        await storage.write(key, JSON.stringify(data))
+        const storageKey = this.getStorageKey(contract)
+        const obfuscated = obfuscateKey(privateKey)
+        await storage.write(storageKey, obfuscated)
     }
 
     /**
-     * Delete local signing data from storage
+     * Delete the stored private key for a contract
      */
-    async deleteLocalSigningData(storage: SessionStorage, contract: NameType): Promise<void> {
+    async deletePrivateKey(storage: SessionStorage, contract: NameType): Promise<void> {
         const key = this.getStorageKey(contract)
         await storage.remove(key)
     }
@@ -269,13 +284,14 @@ export class TransactPluginLocalSigning extends AbstractTransactPlugin {
 
     /**
      * Check if local signing is already set up for a contract
+     * (If a key exists in storage, the permission has been set up)
      */
     async isSetup(session: Session, contract: NameType): Promise<boolean> {
         if (!session.storage) {
             return false
         }
-        const data = await this.loadLocalSigningData(session.storage, contract)
-        return data?.permissionSetup === true
+        const privateKey = await this.loadPrivateKey(session.storage, contract)
+        return privateKey !== undefined
     }
 
     /**
@@ -305,7 +321,7 @@ export class TransactPluginLocalSigning extends AbstractTransactPlugin {
 
         // Delete stored keys for all configured contracts
         for (const config of this.actionConfigs) {
-            await this.deleteLocalSigningData(session.storage, config.contract)
+            await this.deletePrivateKey(session.storage, config.contract)
         }
     }
 
@@ -324,47 +340,6 @@ export class TransactPluginLocalSigning extends AbstractTransactPlugin {
                 const resolved = await context.resolve(request)
                 const transaction = Transaction.from(resolved.transaction)
 
-                // Check if any actions need local signing setup
-                for (const config of this.actionConfigs) {
-                    const localData = await this.loadLocalSigningData(
-                        context.storage,
-                        config.contract
-                    )
-
-                    // If we have key data but permission isn't set up yet, prepend the setup actions
-                    if (localData && !localData.permissionSetup) {
-                        const updateAuthAction = this.createUpdateAuthAction(
-                            context.accountName,
-                            config.contract,
-                            localData.publicKey
-                        )
-                        const linkAuthActions = this.createLinkAuthActions(
-                            context.accountName,
-                            config.contract,
-                            config.actions
-                        )
-
-                        // Create a new request with the permission setup actions prepended
-                        const allActions = [
-                            updateAuthAction,
-                            ...linkAuthActions,
-                            ...transaction.actions,
-                        ]
-                        const newRequest = await context.createRequest({
-                            actions: allActions,
-                        })
-
-                        // Mark as set up (optimistically - if tx fails, user can retry)
-                        localData.permissionSetup = true
-                        await this.saveLocalSigningData(context.storage, config.contract, localData)
-
-                        // Return the modified request - user will sign with their wallet
-                        return {
-                            request: newRequest,
-                        }
-                    }
-                }
-
                 // Check if ALL actions in the transaction can be handled by local signing
                 const allActionsAreLocal = transaction.actions.every((action) =>
                     this.isLocalSigningAction(action)
@@ -375,27 +350,27 @@ export class TransactPluginLocalSigning extends AbstractTransactPlugin {
                     return
                 }
 
-                // Find the first matching contract to get the stored key
-                let localData: LocalSigningData | undefined
+                // Find a stored private key for one of the action's contracts
+                let privateKeyWif: string | undefined
                 for (const action of transaction.actions) {
                     for (const config of this.actionConfigs) {
                         if (Name.from(action.account).equals(config.contract)) {
-                            localData = await this.loadLocalSigningData(
+                            privateKeyWif = await this.loadPrivateKey(
                                 context.storage,
                                 config.contract
                             )
-                            if (localData?.permissionSetup) {
+                            if (privateKeyWif) {
                                 break
                             }
                         }
                     }
-                    if (localData?.permissionSetup) {
+                    if (privateKeyWif) {
                         break
                     }
                 }
 
-                if (!localData?.permissionSetup || !localData.privateKey) {
-                    // Not set up yet, proceed with normal signing
+                if (!privateKeyWif) {
+                    // No key stored, proceed with normal signing
                     return
                 }
 
@@ -403,7 +378,7 @@ export class TransactPluginLocalSigning extends AbstractTransactPlugin {
                 const signature = this.signWithLocalKey(
                     transaction,
                     Checksum256.from(context.chain.id),
-                    localData.privateKey
+                    privateKeyWif
                 )
 
                 // Return the signatures
@@ -455,12 +430,9 @@ export class LocalSigningLoginPlugin extends AbstractLoginPlugin {
 
             // Process each configured contract
             for (const config of this.parent.getActionConfigs()) {
-                // Check if already set up
-                const existingData = await this.parent.loadLocalSigningData(
-                    storage,
-                    config.contract
-                )
-                if (existingData?.privateKey) {
+                // Check if already set up (key exists = permission set up)
+                const existingKey = await this.parent.loadPrivateKey(storage, config.contract)
+                if (existingKey) {
                     continue // Already have a key for this contract
                 }
 
@@ -508,43 +480,35 @@ export class LocalSigningLoginPlugin extends AbstractLoginPlugin {
                 // Generate a new key pair
                 const {privateKey, publicKey} = this.parent.generateLocalKey()
 
-                // Save the local signing data
-                const localData: LocalSigningData = {
-                    privateKey: String(privateKey),
-                    publicKey,
-                    permissionSetup: false,
+                // We need the session to set up the permission
+                if (!ctxWithSession.session) {
+                    continue // Can't set up without a session
                 }
-                await this.parent.saveLocalSigningData(storage, config.contract, localData)
 
-                // If we have access to the session, set up the permission now
-                if (ctxWithSession.session) {
-                    try {
-                        const updateAuthAction = this.parent.createUpdateAuthAction(
-                            ctxWithSession.session.actor,
-                            config.contract,
-                            publicKey
-                        )
-                        const linkAuthActions = this.parent.createLinkAuthActions(
-                            ctxWithSession.session.actor,
-                            config.contract,
-                            config.actions
-                        )
+                try {
+                    const updateAuthAction = this.parent.createUpdateAuthAction(
+                        ctxWithSession.session.actor,
+                        config.contract,
+                        publicKey
+                    )
+                    const linkAuthActions = this.parent.createLinkAuthActions(
+                        ctxWithSession.session.actor,
+                        config.contract,
+                        config.actions
+                    )
 
-                        // Execute the permission setup transaction
-                        await ctxWithSession.session.transact({
-                            actions: [updateAuthAction, ...linkAuthActions],
-                        })
+                    // Execute the permission setup transaction
+                    await ctxWithSession.session.transact({
+                        actions: [updateAuthAction, ...linkAuthActions],
+                    })
 
-                        // Mark as set up
-                        localData.permissionSetup = true
-                        await this.parent.saveLocalSigningData(storage, config.contract, localData)
-                    } catch (error) {
-                        // Transaction failed, clean up the stored data
-                        await this.parent.deleteLocalSigningData(storage, config.contract)
-                        throw error
-                    }
+                    // Only save the key after successful setup
+                    // (key existing = permission set up)
+                    await this.parent.savePrivateKey(storage, config.contract, String(privateKey))
+                } catch (error) {
+                    // Transaction failed, don't save the key
+                    throw error
                 }
-                // If no session available (old SessionKit), permission setup happens on first transact
             }
         })
     }
