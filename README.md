@@ -66,7 +66,7 @@ const {session} = await sessionKit.login()
 
 // If they approve, the plugin will:
 // 1. Generate a new local key
-// 2. Create an updateauth transaction to add a 'local' permission
+// 2. Create an updateauth transaction to add a permission named after the contract (e.g., 'gamecontract')
 // 3. Create linkauth transactions to link that permission to the configured actions
 // 4. The user signs this setup transaction with their wallet
 ```
@@ -79,7 +79,7 @@ await session.transact({
     action: {
         account: 'gamecontract',
         name: 'play',
-        authorization: [{actor: session.actor, permission: 'local'}],
+        authorization: [{actor: session.actor, permission: 'gamecontract'}], // permission = contract name
         data: {
             /* ... */
         },
@@ -111,13 +111,10 @@ await sessionKit.logout(session)
 interface TransactPluginLocalSigningOptions {
     // Array of contract/action configurations to handle locally
     actionConfigs: LocalSigningActionConfig[]
-
-    // The permission name to create (default: 'local')
-    permissionName?: string
 }
 
 interface LocalSigningActionConfig {
-    // The contract account name
+    // The contract account name (also used as the permission name)
     contract: string
 
     // The action names that should be auto-signed
@@ -131,17 +128,21 @@ interface LocalSigningActionConfig {
 const localSigningPlugin = new TransactPluginLocalSigning({
     actionConfigs: [
         {
-            contract: 'gamecontract',
+            contract: 'gamecontract', // Permission will be named 'gamecontract'
             actions: ['play', 'claim'],
         },
         {
-            contract: 'nftcontract',
+            contract: 'nftcontract', // Permission will be named 'nftcontract'
             actions: ['equip', 'unequip'],
         },
     ],
-    permissionName: 'autosign', // Custom permission name
 })
 ```
+
+### Storage Pattern
+
+Following the [shipload](https://github.com/shipload) pattern, keys are stored with the key:
+- `localsession-{contract}` (e.g., `localsession-gamecontract`)
 
 ## API Reference
 

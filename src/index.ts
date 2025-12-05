@@ -20,11 +20,8 @@ import {
 /** Import JSON localization strings */
 import defaultTranslations from './translations'
 
-/** Storage key prefix for local signing keys */
-const STORAGE_KEY_PREFIX = 'local-signing'
-
-/** The permission name used for local signing */
-const DEFAULT_PERMISSION_NAME = 'local'
+/** Storage key prefix for local signing keys (matches shipload pattern) */
+const STORAGE_KEY_PREFIX = 'localsession'
 
 /**
  * Configuration for actions that should be handled by local signing
@@ -42,8 +39,6 @@ export interface LocalSigningActionConfig {
 export interface TransactPluginLocalSigningOptions {
     /** Array of contract/action configurations to handle locally */
     actionConfigs: LocalSigningActionConfig[]
-    /** The permission name to create for local signing (default: 'local') */
-    permissionName?: NameType
 }
 
 /**
@@ -68,6 +63,9 @@ interface LocalSigningData {
  *         { contract: 'gamecontract', actions: ['play', 'claim'] }
  *     ]
  * })
+ *
+ * // The permission name will be the contract name itself (e.g., 'gamecontract')
+ * // This follows the shipload pattern for local session keys
  *
  * const sessionKit = new SessionKit({
  *     // ...
@@ -96,9 +94,6 @@ export class TransactPluginLocalSigning extends AbstractTransactPlugin {
     /** The configured actions to handle locally */
     private actionConfigs: LocalSigningActionConfig[]
 
-    /** The permission name to use for local signing */
-    private permissionName: Name
-
     /** The login plugin instance - add this to loginPlugins array */
     public readonly loginPlugin: LocalSigningLoginPlugin
 
@@ -108,17 +103,16 @@ export class TransactPluginLocalSigning extends AbstractTransactPlugin {
             contract: Name.from(config.contract),
             actions: config.actions.map((a) => Name.from(a)),
         }))
-        this.permissionName = Name.from(options.permissionName || DEFAULT_PERMISSION_NAME)
 
         // Create the companion login plugin
         this.loginPlugin = new LocalSigningLoginPlugin(this)
     }
 
     /**
-     * Get the storage key for a specific contract
+     * Get the storage key for a specific contract (matches shipload pattern)
      */
     getStorageKey(contract: NameType): string {
-        return `${STORAGE_KEY_PREFIX}-${contract}-${this.permissionName}`
+        return `${STORAGE_KEY_PREFIX}-${contract}`
     }
 
     /**
@@ -129,10 +123,11 @@ export class TransactPluginLocalSigning extends AbstractTransactPlugin {
     }
 
     /**
-     * Get the permission name
+     * Get the permission name for a contract (permission name = contract name)
+     * This follows the shipload pattern where the permission is named after the contract.
      */
-    getPermissionName(): Name {
-        return this.permissionName
+    getPermissionName(contract: NameType): Name {
+        return Name.from(contract)
     }
 
     /**
@@ -209,12 +204,15 @@ export class TransactPluginLocalSigning extends AbstractTransactPlugin {
 
     /**
      * Create the updateauth action to add a new permission
+     * Permission name = contract name (following shipload pattern)
      */
     createUpdateAuthAction(
         account: NameType,
+        contract: NameType,
         publicKey: string,
         parentPermission: NameType = 'active'
     ): Action {
+        const permissionName = this.getPermissionName(contract)
         return Action.from({
             account: 'eosio',
             name: 'updateauth',
@@ -226,7 +224,7 @@ export class TransactPluginLocalSigning extends AbstractTransactPlugin {
             ],
             data: {
                 account: account,
-                permission: this.permissionName,
+                permission: permissionName,
                 parent: parentPermission,
                 auth: {
                     threshold: 1,
@@ -245,8 +243,10 @@ export class TransactPluginLocalSigning extends AbstractTransactPlugin {
 
     /**
      * Create the linkauth action to link the permission to specific actions
+     * Permission name = contract name (following shipload pattern)
      */
     createLinkAuthActions(account: NameType, contract: NameType, actions: NameType[]): Action[] {
+        const permissionName = this.getPermissionName(contract)
         return actions.map((actionName) =>
             Action.from({
                 account: 'eosio',
@@ -261,7 +261,7 @@ export class TransactPluginLocalSigning extends AbstractTransactPlugin {
                     account: account,
                     code: contract,
                     type: actionName,
-                    requirement: this.permissionName,
+                    requirement: permissionName,
                 },
             })
         )
@@ -335,6 +335,7 @@ export class TransactPluginLocalSigning extends AbstractTransactPlugin {
                     if (localData && !localData.permissionSetup) {
                         const updateAuthAction = this.createUpdateAuthAction(
                             context.accountName,
+                            config.contract,
                             localData.publicKey
                         )
                         const linkAuthActions = this.createLinkAuthActions(
@@ -520,6 +521,7 @@ export class LocalSigningLoginPlugin extends AbstractLoginPlugin {
                     try {
                         const updateAuthAction = this.parent.createUpdateAuthAction(
                             ctxWithSession.session.actor,
+                            config.contract,
                             publicKey
                         )
                         const linkAuthActions = this.parent.createLinkAuthActions(
